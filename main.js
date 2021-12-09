@@ -1,11 +1,10 @@
 //https://discord.com/api/oauth2/authorize?client_id=908296694758789131&permissions=399394470998&scope=bot%20applications.commands
 
-//Poll creation: "Poll: Nachricht des Polls [{:thumbsup:, Ja}{:thumbsdown:, Nein}]"
 // !poll Nachricht <:emoji1: - Wert1, :emoji2: - Wert2>
 
 
 //  constants
-const { Client, Intents, MessageEmbed } = require('discord.js');
+const { Client, Intents, MessageEmbed, Permissions } = require('discord.js');
 const { token, version, prefix, pollDuration } = require('./config.json');
 
 const client = new Client({ 
@@ -16,7 +15,7 @@ const client = new Client({
     ] 
 });
 
-const activePolls = {};
+const activePolls = [];
 const commands = {
     poll: execute_poll
 };
@@ -31,7 +30,8 @@ client.on('messageCreate', message => {
     let author = message.member;
     let content = message.content.trim();
 
-    if(author.id != client.user.id && content.startsWith(prefix)) {
+    if(content.startsWith(prefix) && author.id != client.user.id && author.permissions.has(Permissions.FLAGS.MANAGE_MESSAGES)) {
+
         let firstSpace = content.indexOf(' ');
 
         let command = content.slice(1, firstSpace);
@@ -40,6 +40,8 @@ client.on('messageCreate', message => {
         if(command in commands) {
             commands[command](message, args);
         }
+
+        message.delete();
     }
 });
 
@@ -50,9 +52,10 @@ client.login(token);
 function execute_poll(msg, args) {
     let startOfReactions = args.indexOf('<');
 
-    let pollTitle = args.slice(0, startOfReactions);
+    let pollTitle = args.slice(0, startOfReactions).trim();
     let reactions = args.slice(startOfReactions + 1, args.length - 1).split(',');
 
+    let emojis = [];
     let voteOptions = [];
     let messageRows = [];
 
@@ -60,6 +63,7 @@ function execute_poll(msg, args) {
         let reaction = getReaction(reactions[i], i);
 
         if(reaction) {
+            emojis[i] = reaction.reaction;
             voteOptions[i] = reaction;
             messageRows.push(reaction.messageRow);
         } else {
@@ -67,40 +71,40 @@ function execute_poll(msg, args) {
         }
     }
 
-    activePolls[msg.id] = {
-        title: pollTitle,
-        options: voteOptions,
-        votes: {}
-    };
-
     let botMsg = new MessageEmbed()
                 .setColor('#0099ff')
                 .setTitle(pollTitle)
                 .setDescription('Reagiere mit dem entsprechenden Emoji, um für eine Option abzustimmen')
                 .addFields(messageRows)
                 .setTimestamp()
-                .setFooter('Diese Abstimmung wurde automatisch generiert');
+                .setFooter('Diese Abstimmung wurde von ' + msg.member.user.username + ' gestartet');
 
-    msg.channel.send({ embeds: [botMsg] }).then(async msg => {
-
+    msg.channel.send({ embeds: [botMsg] }).then(async pollMessage => {
         try {
             for(let element of voteOptions) {
-                await msg.react(element.reaction);
+                await pollMessage.react(element.reaction);
             }
         } catch (exception) {
             console.log('Could not attach Reactions to poll');
-            delete activePolls[msg.id];
+            pollMessage.delete();
+            return;
         }
 
+        activePolls[pollMessage.id] = {
+            title: pollTitle,
+            options: voteOptions,
+            embed: botMsg,
+            votes: {}
+        };
+
+        console.log(`${message.member.username} hat eine Umfrage "${pollTitle}" gestartet, die ${pollDuration} Minuten aktiv ist`)
+
+        const filter = (reaction, user) => client.user.id !== user.id;
+        const collector = pollMessage.createReactionCollector({ filter, time: 60000 * pollDuration });
+
+        collector.on('collect', (reaction, user) => collectReaction(reaction, pollMessage, user));
+        collector.on('end', () => stopCollection(pollMessage));
     });
-
-    console.log('Created poll');
-
-    let filter = (reaction, user) => user.id !== client.user.id;
-
-    let collector = msg.createReactionCollector({ filter, time: 60000 * pollDuration });
-    collector.on('collect', (reaction, user) => { /*collectReaction(reaction, msg, user)*/ console.log('collected reaction') });
-    collector.on('end', () => { stopCollection(msg) });
 }
 
 function getReaction(msg, id) {
@@ -126,7 +130,7 @@ function getReaction(msg, id) {
 }
 
 function collectReaction(reaction, message, user) {
-    reaction.users.removeAll(user);
+    reaction.users.remove(user);
 
     let pollObject = activePolls[message.id];
     let pollOption = false;
@@ -149,62 +153,74 @@ function collectReaction(reaction, message, user) {
                 pollOption.numVotes--;
                 pollObject.votes[user.id] = -1;
             } else {
-                pollObject.options[votedId].numVotes--;
-                pollOption.numVotes++;
+                let oldOption = pollObject.options[votedId];
+                oldOption.messageRow.value = --oldOption.numVotes + ' Votes';
 
+                pollOption.numVotes++;
                 pollObject.votes[user.id] = pollOption.id;
             }
         } else {
             pollObject.votes[user.id] = pollOption.id;
-
             pollOption.numVotes++;
         }
 
+        console.log(`Der Nutzer ${user.username} hat für die Option "${pollOption.text}" gestimmt`);
+
         pollOption.messageRow.value = pollOption.numVotes + ' Votes';
-        displayChanges();
+        displayChanges(pollObject, message);
     }
 }
 
-function displayChanges(pollObject, message) {
+async function displayChanges(pollObject, message) {
     let rows = [];
 
     pollObject.options.forEach(element => {
         rows.push(element.messageRow);
     });
 
-    let embed = new MessageEmbed()
-                .setFields(rows);
-
-    message.edit(embed);
+    pollObject.embed.setFields(rows);
+    await message.edit({ embeds: [pollObject.embed] });
 }
 
-function stopCollection(message) {
+async function stopCollection(message) {
     let pollObject = activePolls[message.id];
 
-    let tie = true;
+    let tie = false;
     let highestVote = false;
 
     pollObject.options.forEach(element => {
         if(highestVote) {
             if(element.numVotes > highestVote.numVotes) {
                 highestVote = element;
-                tie = false;
             } else if (element.numVotes === highestVote.numVotes) {
                 tie = true;
             }
+        } else {
+            highestVote = element;
         }
     });
 
-    delete activePolls[message.id];
+    let rows = [];
+    pollObject.options.forEach(element => {
+        if (element.numVotes !== highestVote.numVotes) {
+            element.messageRow.name = `~~${element.messageRow.name}~~`;
+            element.messageRow.value = `~~${element.messageRow.value}~~`;
+        }
 
-    let embed = new MessageEmbed();
+        rows.push(element.messageRow);
+    });
 
+    pollObject.embed.setFields(rows);
     if(tie) {
-        embed.setDescription('Es gab einen Gleichstand!');
+        pollObject.embed.setDescription('Es gab einen Gleichstand!');
+        console.log(`Die Umfrage ${pollObject.title} wurde mit einem Gleichstand beendet`);
     } else {
-        embed.setDescription(`${highestVote.text} hat die Abstimmung gewonnen!`);
+        pollObject.embed.setDescription(`Der Gewinner der Abstimmung ist "${highestVote.text}" mit ${highestVote.numVotes} Stimmen`);
+        console.log(`Die Umfrage ${pollObject.title} wurde mit beendet. Die Option "${highestVote.text}" hat mit ${highestVote.numVotes} Stimmen gewonnen`);
     }
 
-    message.reactions.removeAll();
-    message.edit(embed);
+    await message.reactions.removeAll();
+    await message.edit({ embeds: [pollObject.embed] });
+
+    delete activePolls[message.id];
 }
