@@ -238,11 +238,6 @@ class PollOption {
 
         if (option.length == 3) {
             let description = option[2].trim()
-            if (description.length > 45) {
-                PollManager.respondError(message, 'Die Beschreibung einer Option darf maximal 45 Zeichen lang sein')
-                return false
-            }   
-
             return new PollOption(name, emoji, description)
         }
 
