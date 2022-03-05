@@ -1,0 +1,6 @@
+Create file named config.json that looks like this:
+{
+ "token": "123456789abcdef",
+ "version": "x.x.x",
+ "prefix": "!"
+}
